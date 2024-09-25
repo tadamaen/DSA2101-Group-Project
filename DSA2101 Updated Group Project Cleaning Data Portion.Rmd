@@ -1,0 +1,417 @@
+---
+title: "DSA2101 Group Project: World Cup Dataset"
+author:
+  - Chia Kwang Yang
+  - Lee Weng Heng, Jon
+  - Qiu Zi Hao
+  - Tan Teck Hwe Damaen
+  - Valerie Oh (Hu Xue Yong)
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The FIFA World Cup Dataset covers every single World Cup match played in its history from Uruguay in 1930 to Russia in 2018. The dataset consists of two `csv` files: `wcmatches.csv` and `worldcups.csv`.
+
+1. The `wcmatches.csv` file contains every football match played in the World Cup, with some columns like which year, which team claimed victory, and what the win condition was.
+
+2. The `worldcups.csv` file contains the winners and has some dataset features like winners, games, goals_scored and more.
+
+We load the libraries to be used here:
+```{r libraries, warning = FALSE, message = FALSE}
+library(tidytuesdayR)
+library(readr)
+library(tidyverse)
+library(stringr)
+library(forcats)
+library(maps)
+library(ggthemes)
+library(ggrepel)
+```
+
+# Data Cleaning and Summary
+
+Firstly, we read in the two datasets using the `readr` package.
+
+```{r Reading Data, warning = FALSE, message = FALSE}
+wcmatches <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-11-29/wcmatches.csv')
+worldcups <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-11-29/worldcups.csv')
+```
+
+## Data Cleaning
+
+We performed data cleaning on both datasets. We start with the `worldcups` dataset by using the `pivot_longer` function to consolidate the columns from `winner` to `fourth` into the `position_status` column. We standardized "USA" to "United States" and introduced a new `continent` feature, categorizing countries into three groups: North and South America (`americas`), Europe (`europe`), and the rest of the world (`others`) for future visualization.
+
+
+```{r Data Cleaning for `worldcups.csv`}
+# Code block for the worldcups dataset
+
+# Transform the 'worldcups' data frame using pivot_longer
+worldcups_tidy <- worldcups %>%
+  pivot_longer(winner:fourth, names_to = "position_status", values_to = "country_name") %>%
+  
+  # Rename columns for clarity
+  rename(host_country = host) %>%
+  
+  # Standardize country names for the host and participating countries
+  mutate(
+    host_country = ifelse(host_country == "USA", "United States", host_country), 
+    country_name = ifelse(country_name == "USA", "United States", country_name)
+  ) 
+```
+
+
+For the `wcmatches` dataset, we refined column names from `stage` to `stage_status` and `outcome` to `win_outcome`. We realised that `stage_status` did not have consistent values amongst the Group Stage and Finals, and converted `Group` to `Group Stage` and `Final Round` to `Final` for consistency. We removed the `date` column, and cleaned up the columns denoting the wins by expanding the `win_outcome` column to represent Home, Draw and Away and filled missing values in `win_conditions` with `Nil`. Lastly, we featured engineer the score difference as well as the win conditions, creating two new features `after_extra_time` and `penalties`. Additionally, some former teams like the Soviet Union and Yugoslavia were renamed to their present-day countries in preparation for our heatmap using `map_data("world")` from the `maps` package.
+
+```{r Data Cleaning for `wcmatches.csv`}
+# Code block for the wcmatches dataset 
+
+country_replacer <- function(x) {case_when(
+      x %in% c("West Germany", "East Germany") ~ "Germany",
+      x %in% c("Soviet Union") ~ "Russia",
+      x %in% c("Yugoslavia", "FR Yugoslavia") ~ "Serbia",
+      x %in% c("Czechoslovakia") ~ "Czech Republic",
+      x %in% c("Dutch West Indies") ~ "Indonesia",
+      x %in% c("Zaire") ~ "Democratic Republic of the Congo",
+      TRUE ~ x)}
+
+# Rename columns for clarity
+wcmatches_tidy <- wcmatches %>%
+  rename(stage_status = stage, win_outcome = outcome) %>%
+  # Standardize values in the 'stage_status' column
+  mutate(
+    stage_status = ifelse(str_detect(stage_status, "Group"), "Group Stage", stage_status), 
+    stage_status = ifelse(stage_status == "Final Round", "Final", stage_status)
+  ) %>%
+  # Remove the 'date' column
+  select(-date) %>%
+  mutate(
+    # Categorize win outcomes for clear representation
+    win_outcome = case_when(
+      home_score == away_score ~ "Draw",
+      win_outcome == "H" ~ "Home",
+      win_outcome == "D" ~ "Draw",
+      win_outcome == "A" ~ "Away"
+    ),
+    # Clean countries up
+    country = country_replacer(country),
+    winning_team = country_replacer(winning_team),
+    home_team = country_replacer(home_team),
+    away_team = country_replacer(away_team)
+    
+  ) %>%
+  
+  # Feature engineering
+  mutate(
+    # Calculate score difference
+    score_difference = abs(home_score - away_score), 
+    
+    # Handle missing win conditions
+    win_conditions = replace_na(win_conditions, "Nil"),
+    
+    # Create binary features based on win conditions
+    after_extra_time = ifelse(str_detect(win_conditions, "AET"), 1, 0), 
+    penalties = ifelse(str_detect(win_conditions, "penalties"), 1, 0)
+  )
+
+wcmatches_tidy %>% filter(country == "Germany")
+worldcups_tidy
+```
+
+There are a few interesting statistics that we have found out with the datasets:
+
+1. The years 1942 and 1946 are not included in the dataset. Upon further research, we realise that the World Cup was not held in 1942 and 1946 due to the Second World War (Marcotti, 2014). This leads to a larger year difference of 12 years between the 1938 and the 1950 World Cup matches, which will be reflected in some of our plots.
+
+2. The years 1934, 1938 and 1950 had a very different format, unlike traditional World Cups (Topend Sports, n.d.). A traditional World Cup often consists of the Group Stages, Round of 16, Quarterfinals, Semifinals and Finals. Typically, matches after the group stages were played in a knockout format, i.e. the winning team will continue, while the losing team was eliminated. However, in 1934 and 1938, there were no group stages, while in 1950, the stages after the group stages were considered "Finals" and played just like group stages instead of the aforementioned knockout format. This will be reflected in some of our plots as well. 
+
+``` {r Statistic 1}
+# The years where the World Cup is supposed to be held on
+supposed_years <- seq(1930, 2018, by = 4)
+
+# The years where the World Cup is actually held on, for visualization purposes
+actual_years <- wcmatches_tidy %>% 
+  select(year) %>% 
+  distinct()
+
+# Find years that do not exist in actual_years
+missing_years <- supposed_years[!(supposed_years %in% actual_years$year)]
+missing_years
+```
+
+``` {r Statistic 2}
+# Stages for 1934
+stages_1934 <- wcmatches_tidy %>% 
+  filter(year == 1934) %>%
+  select(stage_status) %>%
+  distinct()
+
+# Stages for 1938
+stages_1938 <- wcmatches_tidy %>% 
+  filter(year == 1938) %>%
+  select(stage_status) %>%
+  distinct()
+
+stages_1950 <- wcmatches_tidy %>% 
+  filter(year == 1950) %>%
+  select(stage_status) %>%
+  distinct()
+
+stages_1934
+stages_1938
+stages_1950
+```
+
+Lastly, here are some descriptive statistics that will help understand some of these plots better:
+```{r}
+# Total number of World Cups
+total_world_cups <- wcmatches_tidy %>%
+  distinct(year) %>%
+  summarize(total_world_cups = n())
+
+# Total games played so far
+total_games_played <- worldcups_tidy %>% 
+  select(games) %>% 
+  summarize(total_games_played = sum(games))
+
+# Number of teams that have participated throughout the world cup
+total_teams_participated <- wcmatches_tidy %>%
+  select(home_team) %>%
+  distinct() %>%
+  rename(country = home_team) %>%
+  bind_rows(wcmatches_tidy %>%
+              select(away_team) %>%
+              distinct() %>%
+              rename(country = away_team)) %>%
+  distinct() %>%
+  summarize(total_teams_participated = n())
+
+# Number of max goals scored by a host
+max_goals_home <- wcmatches_tidy %>% 
+  select(home_score) %>% 
+  summarize(max_goals_home = max(home_score))
+
+# Biggest difference between two countries
+max_difference <- wcmatches_tidy %>% 
+  select(score_difference) %>% 
+  summarize(max_difference = max(score_difference))
+
+descriptive_statistics <- bind_cols(total_world_cups, total_games_played, total_teams_participated, max_goals_home, max_difference)
+
+descriptive_statistics
+```
+
+These are all in preparation to answer the question: **What factors affect the performance of the World Cup?**
+
+# Visualisations
+To answer our question, we prepared three visualisations: a heatmap, a scatterplot and a line plot.
+
+## Visualisation 1: Heatmap
+We want to see if geographical factors affect the performance of the World Cup. Therefore, we manipulated the data to tabulate the all-time total points for each country, before showcasing the total points across all World Cup matches on a heatmap. A heatmap, in this case, is good to show intensity in data through the use of a blue colour gradient which shows the points earned throughout the World Cups. From there, we can see that South American and European countries usually dominate the World Cups, with Brazil, Germany and Italy scoring the highest points.
+
+```{r Heatmap}
+# Calculate win / lose points
+wcmatches_wins <- wcmatches_tidy %>%
+  filter(win_outcome %in% c("Home", "Away")) %>%
+  group_by(country = case_when(win_outcome == "Home" ~ home_team, win_outcome == "Away" ~ away_team)) %>%
+  summarise(win_points = 3 * n())
+
+# Calculate draw points
+wcmatches_draws <- wcmatches_tidy %>%
+  filter(win_outcome == "Draw") %>%
+  pivot_longer(home_team:away_team) %>%
+  rename(country_draw = value) %>%
+  select(country_draw) %>%
+  group_by(country_draw) %>%
+  summarise(draw_points = n()) %>%
+  rename(country = country_draw)
+
+
+# Get unique home and away countries
+wcmatches_allcountries <- wcmatches_tidy %>%
+  select(home_team) %>%
+  distinct() %>%
+  rename(country = home_team) %>%
+  bind_rows(wcmatches_tidy %>%
+              select(away_team) %>%
+              distinct() %>%
+              rename(country = away_team)) %>%
+  distinct()
+
+# Tabulate the points for each country
+wcmatches_tabulated <- wcmatches_wins %>%
+  full_join(wcmatches_draws, by = "country") %>%
+  full_join(wcmatches_allcountries, by = "country") %>%
+  mutate(
+    win_points = replace_na(win_points, 0),
+    draw_points = replace_na(draw_points, 0),
+    total_points = win_points + draw_points,
+    ) %>%
+  group_by(country) %>%
+  summarise(total_points = sum(total_points))
+
+
+# Part 2: Visualising `total_points` on a heatmap
+
+# Consistency within regions
+world_map <- map_data("world") %>%
+             mutate(region = case_when(
+               region == "USA" ~ "United States",
+               region == "China" ~ "China PR",
+               region == "Ireland" ~ "Republic of Ireland",
+               subregion == "Scotland" ~ "Scotland",
+               subregion == "Great Britain" ~ "England",
+               subregion == "Isle of Wight" ~ "England",
+               subregion == "Wales" ~ "Wales",
+               subregion == "Northern Ireland" ~ "Northern Ireland",
+               .default = region)) %>%
+             select(-subregion)
+
+# Join tabulated wcmatches and top countries 
+top_countries_joined <- wcmatches_tabulated %>%
+                        full_join(world_map, by = c("country" = "region"))
+
+ggplot(top_countries_joined, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = total_points)) +
+  labs(title = "Global Distribution of Total Points obtained across World Cups (1930-2018)") +
+  scale_fill_continuous(name = "Total Points", low = "#89CFF0", high = "#1F618D", na.value = "white") +
+  borders(colour = "black", size = 0.1) +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.title = element_blank(), axis.text = element_blank(),
+        panel.grid = element_blank(), plot.title = element_text(hjust = 0.5)) +
+  ylim(-60, 90)
+```
+
+## Visualisation 2: Scatter Plot
+We want to investigate whether home country advantage is a factor in winning the World Cup. To do this, we manipulate the data to get the proportion of games a country wins when they are the host of the World Cup against when they are not the host, which are then plotted on the scatter plot. The scatter plot allows us to see the relationship between two continuous variables (in this case, the proportions of home vs away games). Moreover, it allows us to plot a regression, which in this case shows that countries that lie above regression line have higher proportion of wins at home while countries that lie below the regression line has higher proportion of wins when away. Brazil has the highest proportion of wins away (70.83%) while Russia has the highest proportion of wins when away (60%).
+
+```{r Scatter, warning = FALSE, message = FALSE}
+# Total matches played per host country
+wc_host_matches_played <- wcmatches_tidy %>%
+  filter(country == home_team) %>%
+  group_by(country) %>%
+  summarise(total_matches_played = n())
+
+# Total wins per host country
+wcmatches_tidy1 <- wcmatches_tidy %>%
+  filter(country == home_team, country == winning_team) %>%
+  select(year, country, stage_status, home_team, win_outcome) %>%
+  group_by(country) %>%
+  summarise(host_wins = n())
+
+# Win Proportion out of matches played
+wc_host_wins_prop <- wc_host_matches_played %>%
+  full_join(wcmatches_tidy1) %>%
+  mutate(host_win_prop = round(host_wins * 100 / total_matches_played, 2))
+
+# Wins when country is not host
+wc_away_wins <- wcmatches_tidy %>%
+  group_by(winning_team) %>%
+  summarise(total_wins = n()) %>%
+  rename(country = winning_team) %>%
+  full_join(wcmatches_tidy1) %>%
+  replace_na(list(host_wins = 0)) %>%
+  mutate(away_wins = total_wins - host_wins) %>%
+  select(country, away_wins)
+
+# Matches played as 'home_team' by non-host
+home_matches_played <- wcmatches_tidy %>%
+  filter(country != home_team) %>%
+  group_by(home_team) %>%
+  summarise(home_played = n()) %>%
+  rename(country = home_team)
+
+# Matches played as 'away_team' by non-host
+away_matches_played <- wcmatches_tidy %>%
+  group_by(away_team) %>%
+  summarise(away_played = n()) %>%
+  rename(country = away_team)
+
+#Merge all data to find proportion
+wc_win_prop_combine <- home_matches_played %>%
+  full_join(away_matches_played, by = 'country') %>%
+  full_join(wc_away_wins, by = 'country') %>%
+  replace_na(list(away_wins = 0)) %>%
+  mutate(total_played = home_played + away_played) %>%
+  group_by(country) %>%
+  summarise(away_wins_prop = round(away_wins * 100 / total_played, 2)) %>%
+  right_join(wc_host_wins_prop, by = 'country') %>%
+  select(country, host_win_prop, away_wins_prop)
+
+# Plotting
+ggplot(data = wc_win_prop_combine, aes(x = host_win_prop, y = away_wins_prop)) +
+  geom_point() +
+  geom_text(aes(label = country), hjust = -0.15, vjust = -0.1, size = 3) +
+  ylim(0, 80) +
+  geom_abline(color = 'red', linetype = 2) +
+  labs(title = 'Host Country Performance VS when Away',
+       x = "Proportion of Wins at Home",
+       y = "Proportion of Wins not at Home (Away)") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(0, 110), breaks = seq(0, 100, 20)) + 
+  theme(plot.title = element_text(hjust = 0.5, size = 20))
+```
+
+## Visualisation 3: Line Plot
+Lastly, we want to find whether or not the different stages affects whether or not a country performs well in the world cup. We get the average goals for the group stages and non-group stages for each world cup and plot it using a line plot. The line plot allows us to see the changes in average goals over each world cup. Moreover, we are able to plot more than one line plot to see how the average goals change when it is during a group stage, and when it is not during a group stage. Generally, countries tend to score better during the non-group stage matches, with 73.7% of World Cups demonstrating this trend (with the exception of 1934 and 1938).
+
+```{r Line Plot}
+viz_3_wcmatches <- wcmatches_tidy %>% 
+  filter(home_team == country) %>%
+  select(year, home_score) %>%
+  group_by(year) %>%
+  summarize(total_goals_scored = sum(home_score))
+
+viz_3_worldcups <- worldcups_tidy %>%
+  rename(country = host_country) %>%
+  group_by(year, country) %>% 
+  summarize(goals_scored = mean(goals_scored)) %>% 
+  select(year, country, goals_scored)
+
+viz_3_data <- viz_3_wcmatches %>%
+  left_join(viz_3_worldcups, by = "year") %>%
+  mutate(goal_proportion = (total_goals_scored / goals_scored) * 100) %>%
+  select(year, country, goal_proportion)
+
+wc_goals_scored <- wcmatches_tidy  %>%
+  select(year, stage_status, home_score, away_score) %>%
+  mutate(total_scored = home_score + away_score) %>%
+  group_by(year, stage_status) %>%
+  mutate(stage_status = if_else(stage_status != 'Group Stage', 'Non-Group Stage', 'Group Stage')) %>%
+  summarise(total_goals = sum(total_scored), total_matches = n()) %>%
+  mutate(avg_goals_per_match = total_goals/total_matches)
+
+ggplot(data=wc_goals_scored, aes(x=year, y=avg_goals_per_match, group = stage_status, color = stage_status)) +
+  geom_line() + 
+  labs(title = "Do countries score better in group stages or non-group stages?",
+       subtitle = "Comparing average goals for group stage vs non-group stage",
+       x = "Year",
+       y = "Average Goals / Match", 
+       color = "Stage Status") +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = seq(1930, 2018, by = 8)) + 
+  theme_minimal() + 
+  theme(legend.position = c(0.9, 0.9))
+
+```
+
+# Discussion
+The primary insights we aim to convey through our visualisations are the different factors that might affect nations' World Cup performances. Most of the visualisations appear as such because of the nature of the World Cup - it eliminates the weaker nations early during the Group Stages and the stronger nations compete against each other to earn the biggest honor for a country's football team, explaining the heat map of total points. As the World Cup progresses, the matches get more intense as nations are one step closer to the ultimate trophy, and explains why countries score better during non-group stages.
+
+
+# References
+R for Data Science Community. (2022, November 29). TidyTuesday Week 48, 2022. GitHub. https://github.com/rfordatascience/tidytuesday/blob/master/data/2022/2022-11-29
+
+Marcotti, G. (2014, May 30). 1950 World Cup unlike any other. ESPN.Com. https://www.espn.com/soccer/story/_/id/37364595/a-tournament-unlike-other
+
+FIFA World Cup Formats. (n.d.). Topend Sports. Retrieved 17 November 2023, from https://www.topendsports.com/events/worldcupsoccer/formats.htm
+
+USA ’94: A World Cup of firsts. (2016, May 4). FIFA Museum. https://www.fifamuseum.com/en/blog-stories/blog/usa-94-a-15th-world-cup-full-of-firsts-2610677/
+
+Lopez, G. (2022, December 13). The power of history. The New York Times. https://www.nytimes.com/2022/12/13/briefing/morocco-world-cup.html
+
+
